@@ -9,7 +9,7 @@ use std::time::Duration;
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use teloxide::utils::command::BotCommands;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tracing::error;
 
 pub async fn handle_message(
@@ -53,7 +53,7 @@ async fn handle_command(
             let adapter = get_adapter(&config.session.default_adapter, &config)?;
             let workdir = PathBuf::from(&config.session.workdir);
             match session_manager.spawn_session(chat_id, adapter, &workdir).await {
-                Ok((handle, mut output_rx)) => {
+                Ok((handle, output_rx)) => {
                     bot.send_message(
                         msg.chat.id,
                         format!(
@@ -63,7 +63,6 @@ async fn handle_command(
                     )
                     .await?;
 
-                    // Spawn output listener with buffering and typing indicator
                     let bot2 = bot.clone();
                     let chat_id2 = msg.chat.id;
                     tokio::spawn(async move {
@@ -91,7 +90,7 @@ async fn handle_command(
             let adapter = get_adapter(&config.session.default_adapter, &config)?;
             let workdir = PathBuf::from(&config.session.workdir);
             match session_manager.reset_session(chat_id, adapter, &workdir).await {
-                Ok((handle, mut output_rx)) => {
+                Ok((handle, output_rx)) => {
                     bot.send_message(
                         msg.chat.id,
                         format!("Session reset with `{}` adapter.", handle.adapter_name),
@@ -211,22 +210,50 @@ async fn handle_content(
         return Ok(());
     };
 
+    // Send typing indicator immediately
+    let _ = bot
+        .send_chat_action(msg.chat.id, ChatAction::Typing)
+        .await;
+
+    // Spawn a background task to keep typing indicator alive
+    let typing_cancel = Arc::new(Notify::new());
+    let typing_cancel2 = typing_cancel.clone();
+    let bot2 = bot.clone();
+    let chat_id2 = msg.chat.id;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(4));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let _ = bot2.send_chat_action(chat_id2, ChatAction::Typing).await;
+                }
+                _ = typing_cancel2.notified() => {
+                    break;
+                }
+            }
+        }
+    });
+
     if is_waiting {
-        // Direct stdin input
         if let Err(e) = handle.supervisor.write_stdin(input_text) {
             bot.send_message(msg.chat.id, format!("Error sending input: {}", e))
                 .await?;
         }
-        // Transition back to Running
         let mut state = handle.state.lock().await;
         state.transition_to_running();
     } else {
-        // Treat as a new prompt
         if let Err(e) = handle.supervisor.write_stdin(input_text) {
             bot.send_message(msg.chat.id, format!("Error sending prompt: {}", e))
                 .await?;
         }
     }
+
+    // Cancel typing indicator after a short delay
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        typing_cancel.notify_one();
+    });
 
     Ok(())
 }
@@ -270,22 +297,15 @@ async fn output_listener(
     mut output_rx: broadcast::Receiver<String>,
 ) {
     let mut buffer = String::new();
-    let mut typing_active = false;
 
     loop {
         match tokio::time::timeout(
-            Duration::from_millis(1500),
+            Duration::from_millis(800),
             output_rx.recv(),
         )
         .await
         {
             Ok(Ok(line)) => {
-                if !typing_active {
-                    let _ = bot
-                        .send_chat_action(chat_id, ChatAction::Typing)
-                        .await;
-                    typing_active = true;
-                }
                 if !line.is_empty() {
                     buffer.push_str(&line);
                     buffer.push('\n');
@@ -301,7 +321,6 @@ async fn output_listener(
             Err(_) => {
                 if !buffer.is_empty() {
                     send_buffered(&bot, chat_id, &mut buffer).await;
-                    typing_active = false;
                 }
             }
         }
