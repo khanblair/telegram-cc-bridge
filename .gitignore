@@ -1,3 +1,5 @@
 /target
 *.db
+bridge.log
+bridge.pid
 config/default.toml
