@@ -5,13 +5,17 @@ use crate::session::manager::SessionManager;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use teloxide::prelude::*;
+use teloxide::types::ChatAction;
 use teloxide::utils::command::BotCommands;
+use tokio::sync::broadcast;
+use tracing::error;
 
 pub async fn handle_message(
     bot: Bot,
     msg: Message,
-    config: Arc<AppConfig>,
+    config: AppConfig,
     session_manager: Arc<SessionManager>,
 ) -> Result<()> {
     let _chat_id = msg.chat.id.0;
@@ -39,7 +43,7 @@ async fn handle_command(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    config: Arc<AppConfig>,
+    config: AppConfig,
     session_manager: Arc<SessionManager>,
 ) -> Result<()> {
     let chat_id = msg.chat.id.0;
@@ -59,15 +63,11 @@ async fn handle_command(
                     )
                     .await?;
 
-                    // Spawn output listener
+                    // Spawn output listener with buffering and typing indicator
                     let bot2 = bot.clone();
                     let chat_id2 = msg.chat.id;
                     tokio::spawn(async move {
-                        while let Ok(line) = output_rx.recv().await {
-                            for chunk in formatter::chunk_message(&line) {
-                                let _ = bot2.send_message(chat_id2, chunk).await;
-                            }
-                        }
+                        output_listener(bot2, chat_id2, output_rx).await;
                     });
                 }
                 Err(e) => {
@@ -101,11 +101,7 @@ async fn handle_command(
                     let bot2 = bot.clone();
                     let chat_id2 = msg.chat.id;
                     tokio::spawn(async move {
-                        while let Ok(line) = output_rx.recv().await {
-                            for chunk in formatter::chunk_message(&line) {
-                                let _ = bot2.send_message(chat_id2, chunk).await;
-                            }
-                        }
+                        output_listener(bot2, chat_id2, output_rx).await;
                     });
                 }
                 Err(e) => {
@@ -179,7 +175,7 @@ async fn handle_command(
 async fn handle_content(
     bot: Bot,
     msg: Message,
-    _config: Arc<AppConfig>,
+    _config: AppConfig,
     session_manager: Arc<SessionManager>,
 ) -> Result<()> {
     let chat_id = msg.chat.id.0;
@@ -265,5 +261,63 @@ fn get_adapter(name: &str, config: &AppConfig) -> Result<Arc<dyn CliAdapter + Se
             Ok(Arc::new(CodexAdapter::new(bin)))
         }
         other => Err(anyhow::anyhow!("Unknown adapter: {}", other)),
+    }
+}
+
+async fn output_listener(
+    bot: Bot,
+    chat_id: teloxide::types::ChatId,
+    mut output_rx: broadcast::Receiver<String>,
+) {
+    let mut buffer = String::new();
+    let mut typing_active = false;
+
+    loop {
+        match tokio::time::timeout(
+            Duration::from_millis(1500),
+            output_rx.recv(),
+        )
+        .await
+        {
+            Ok(Ok(line)) => {
+                if !typing_active {
+                    let _ = bot
+                        .send_chat_action(chat_id, ChatAction::Typing)
+                        .await;
+                    typing_active = true;
+                }
+                let cleaned = formatter::clean_output(&line);
+                if !cleaned.is_empty() {
+                    buffer.push_str(&cleaned);
+                    buffer.push('\n');
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                if !buffer.is_empty() {
+                    send_buffered(&bot, chat_id, &mut buffer).await;
+                }
+                break;
+            }
+            Err(_) => {
+                if !buffer.is_empty() {
+                    send_buffered(&bot, chat_id, &mut buffer).await;
+                    typing_active = false;
+                }
+            }
+        }
+    }
+}
+
+async fn send_buffered(bot: &Bot, chat_id: teloxide::types::ChatId, buffer: &mut String) {
+    let text = buffer.trim().to_string();
+    buffer.clear();
+    if text.is_empty() {
+        return;
+    }
+    for chunk in formatter::chunk_message(&text) {
+        if let Err(e) = bot.send_message(chat_id, chunk).await {
+            error!("Failed to send message: {}", e);
+        }
     }
 }

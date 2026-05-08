@@ -74,6 +74,7 @@ impl PtySupervisor {
                             continue;
                         }
 
+                        let line = line.replace('\r', "\n");
                         let clean = strip_ansi_escapes::strip_str(&line);
 
                         let rt = tokio::runtime::Handle::try_current();

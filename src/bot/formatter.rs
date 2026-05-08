@@ -12,7 +12,6 @@ pub fn chunk_message(text: &str) -> Vec<String> {
     let mut current = String::new();
 
     for line in text.lines() {
-        // If a single line exceeds MAX_LEN, split it by character boundary
         if line.len() > MAX_LEN {
             if !current.is_empty() {
                 chunks.push(current.clone());
@@ -44,4 +43,73 @@ pub fn chunk_message(text: &str) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Remove box-drawing characters and UI chrome from Claude Code output.
+pub fn clean_output(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|line| {
+            let has_content = line.chars().any(|c| !is_box_drawing(c) && !c.is_whitespace());
+            has_content
+        })
+        .map(|line| {
+            line.chars()
+                .filter(|c| !is_box_drawing(*c))
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.join("\n")
+}
+
+fn is_box_drawing(c: char) -> bool {
+    matches!(
+        c,
+        '─' | '│'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '╭'
+            | '╮'
+            | '╯'
+            | '╰'
+            | '╴'
+            | '╶'
+            | '╸'
+            | '╹'
+            | '▀'
+            | '▄'
+            | '█'
+            | '▌'
+            | '▐'
+            | '░'
+            | '▒'
+            | '▓'
+            | '▝'
+            | '▗'
+            | '▘'
+            | '▙'
+            | '▚'
+            | '▛'
+            | '▜'
+            | '▞'
+            | '▟'
+            | '◜'
+            | '◝'
+            | '◞'
+            | '◟'
+            | '◢'
+            | '◣'
+            | '◤'
+            | '◥'
+    )
 }
