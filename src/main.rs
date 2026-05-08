@@ -12,19 +12,23 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
+    let _ = dotenvy::from_filename("env.local");
 
     tracing_subscriber::fmt()
         .with_env_filter("telegram_cc_bridge=info")
         .init();
 
     info!("Loading configuration...");
-    let app_config = Arc::new(config::AppConfig::load()?);
+    dotenvy::from_filename("env.local").ok();
+    let app_config = config::AppConfig::load()?;
+    let app_config = Arc::new(app_config);
 
     info!("Initializing database...");
+    let db_path = std::env::current_dir()?.join("bridge.db");
+    let db_url = format!("sqlite://{}", db_path.display());
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect("sqlite:bridge.db")
+        .connect(&db_url)
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;

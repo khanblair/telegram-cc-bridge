@@ -41,7 +41,7 @@ impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
         let settings = config::Config::builder()
             .add_source(config::File::with_name("config/default"))
-            .add_source(config::Environment::with_prefix("BRIDGE"))
+            .add_source(config::Environment::with_prefix("BRIDGE").separator("__"))
             .build()?;
 
         Ok(settings.try_deserialize()?)
