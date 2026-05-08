@@ -2503,6 +2503,7 @@ dependencies = [
  "bytes",
  "chrono",
  "config",
+ "dotenvy",
  "portable-pty",
  "regex",
  "reqwest",
