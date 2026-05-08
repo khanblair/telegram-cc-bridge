@@ -1,9 +1,10 @@
 use crate::adapters::CliAdapter;
 use crate::session::recorder::Recorder;
 use crate::session::state::SessionState;
+use crate::bot::formatter::TerminalScreen;
 use anyhow::Result;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -36,6 +37,9 @@ impl PtySupervisor {
         for arg in adapter.spawn_cmd(workdir).get_args() {
             cmd.arg(arg);
         }
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
 
         let _child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -50,12 +54,11 @@ impl PtySupervisor {
 
         // stdout reader task (blocking IO in spawn_blocking)
         tokio::task::spawn_blocking(move || {
-            let mut buf = String::new();
-            let mut reader = BufReader::new(&mut master_reader);
+            let mut screen = TerminalScreen::new();
+            let mut buf = [0u8; 4096];
 
             loop {
-                buf.clear();
-                match reader.read_line(&mut buf) {
+                match master_reader.read(&mut buf) {
                     Ok(0) => {
                         info!("PTY stdout closed for session {}", session_id);
                         let rt = tokio::runtime::Handle::try_current();
@@ -68,41 +71,38 @@ impl PtySupervisor {
                         }
                         break;
                     }
-                    Ok(_) => {
-                        let line = buf.trim_end().to_string();
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        let line = line.replace('\r', "\n");
-                        let clean = strip_ansi_escapes::strip_str(&line);
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        let lines = screen.process(&chunk);
 
                         let rt = tokio::runtime::Handle::try_current();
                         if let Ok(handle) = rt {
-                            // Check for input prompts
-                            for pat in &patterns {
-                                if pat.is_match(&clean) {
-                                    let s = state_reader.clone();
-                                    let otx = output_tx.clone();
-                                    let clean_clone = clean.clone();
-                                    handle.block_on(async move {
-                                        let mut st = s.lock().await;
-                                        let _ = otx.send(format!("⏸️ Waiting for input: {}", clean_clone.clone()));
-                                        st.transition_to_waiting(clean_clone);
-                                    });
-                                    break;
+                            for line in lines {
+                                // Check for input prompts
+                                for pat in &patterns {
+                                    if pat.is_match(&line) {
+                                        let s = state_reader.clone();
+                                        let otx = output_tx.clone();
+                                        let line_clone = line.clone();
+                                        handle.block_on(async move {
+                                            let mut st = s.lock().await;
+                                            st.transition_to_waiting(line_clone.clone());
+                                            let _ = otx.send(format!("⏸️ Waiting for input: {}", line_clone));
+                                        });
+                                        break;
+                                    }
                                 }
-                            }
 
-                            // Record output
-                            let rec = recorder.clone();
-                            let otx = output_tx.clone();
-                            handle.block_on(async move {
-                                if let Err(e) = rec.record_event(session_id, "out", &clean).await {
-                                    error!("Recorder error: {}", e);
-                                }
-                                let _ = otx.send(clean);
-                            });
+                                // Record output
+                                let rec = recorder.clone();
+                                let otx = output_tx.clone();
+                                handle.block_on(async move {
+                                    if let Err(e) = rec.record_event(session_id, "out", &line).await {
+                                        error!("Recorder error: {}", e);
+                                    }
+                                    let _ = otx.send(line);
+                                });
+                            }
                         }
                     }
                     Err(e) => {
@@ -112,8 +112,20 @@ impl PtySupervisor {
                 }
             }
 
+            // Flush remaining content
             let rt = tokio::runtime::Handle::try_current();
             if let Ok(handle) = rt {
+                if let Some(line) = screen.flush() {
+                    let rec = recorder.clone();
+                    let otx = output_tx.clone();
+                    handle.block_on(async move {
+                        if let Err(e) = rec.record_event(session_id, "out", &line).await {
+                            error!("Recorder error: {}", e);
+                        }
+                        let _ = otx.send(line);
+                    });
+                }
+
                 let s = state_reader.clone();
                 handle.block_on(async move {
                     let mut st = s.lock().await;

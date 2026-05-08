@@ -45,71 +45,138 @@ pub fn chunk_message(text: &str) -> Vec<String> {
     chunks
 }
 
-/// Remove box-drawing characters and UI chrome from Claude Code output.
-pub fn clean_output(text: &str) -> String {
-    let lines: Vec<String> = text
-        .lines()
-        .filter(|line| {
-            let has_content = line.chars().any(|c| !is_box_drawing(c) && !c.is_whitespace());
-            has_content
-        })
-        .map(|line| {
-            line.chars()
-                .filter(|c| !is_box_drawing(*c))
-                .collect::<String>()
-                .trim()
-                .to_string()
-        })
-        .filter(|line| !line.is_empty())
-        .collect();
-    lines.join("\n")
+/// A simple terminal screen buffer that interprets carriage returns
+/// and ANSI escape sequences to extract visible text.
+pub struct TerminalScreen {
+    lines: Vec<String>,
+    current_line: String,
+}
+
+impl TerminalScreen {
+    pub fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            current_line: String::new(),
+        }
+    }
+
+    /// Process raw PTY output and extract visible text changes.
+    /// Returns any completed lines that should be sent.
+    pub fn process(&mut self, raw: &str) -> Vec<String> {
+        let mut completed = Vec::new();
+        let mut chars = raw.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                // Skip ANSI escape sequence
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // skip '['
+                    // Skip until we hit a letter (the command character)
+                    while let Some(&c) = chars.peek() {
+                        if c.is_ascii_alphabetic() {
+                            chars.next();
+                            break;
+                        }
+                        chars.next();
+                    }
+                }
+            } else if ch == '\r' {
+                // Carriage return: overwrite current line
+                self.current_line.clear();
+            } else if ch == '\n' {
+                // Newline: finalize current line
+                let line = std::mem::take(&mut self.current_line);
+                let cleaned = clean_line(&line);
+                if !cleaned.is_empty() {
+                    completed.push(cleaned);
+                }
+            } else {
+                self.current_line.push(ch);
+            }
+        }
+
+        completed
+    }
+
+    /// Flush any remaining content in the current line.
+    pub fn flush(&mut self) -> Option<String> {
+        let line = std::mem::take(&mut self.current_line);
+        let cleaned = clean_line(&line);
+        if cleaned.is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        }
+    }
+}
+
+/// Clean a single line: replace box-drawing with spaces, collapse multiple spaces.
+fn clean_line(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut prev_was_space = true; // skip leading spaces
+
+    for ch in line.chars() {
+        if is_box_drawing(ch) {
+            if !prev_was_space {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else if ch.is_whitespace() {
+            if !prev_was_space {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            result.push(ch);
+            prev_was_space = false;
+        }
+    }
+
+    // Trim trailing space
+    result.trim_end().to_string()
 }
 
 fn is_box_drawing(c: char) -> bool {
     matches!(
         c,
         '─' | '│'
-            | '┌'
-            | '┐'
-            | '└'
-            | '┘'
-            | '├'
-            | '┤'
-            | '┬'
-            | '┴'
-            | '┼'
-            | '╭'
-            | '╮'
-            | '╯'
-            | '╰'
-            | '╴'
-            | '╶'
-            | '╸'
-            | '╹'
-            | '▀'
-            | '▄'
-            | '█'
-            | '▌'
-            | '▐'
-            | '░'
-            | '▒'
-            | '▓'
-            | '▝'
-            | '▗'
-            | '▘'
-            | '▙'
-            | '▚'
-            | '▛'
-            | '▜'
-            | '▞'
-            | '▟'
-            | '◜'
-            | '◝'
-            | '◞'
-            | '◟'
-            | '◢'
-            | '◣'
-            | '◤'
-            | '◥'
+            | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+            | '╭' | '╮' | '╯' | '╰' | '╴' | '╶' | '╸' | '╹'
+            | '▀' | '▄' | '█' | '▌' | '▐' | '░' | '▒' | '▓'
+            | '▝' | '▗' | '▘' | '▙' | '▚' | '▛' | '▜' | '▞' | '▟'
+            | '◜' | '◝' | '◞' | '◟' | '◢' | '◣' | '◤' | '◥'
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_screen_basic() {
+        let mut screen = TerminalScreen::new();
+        let lines = screen.process("Hello world\n");
+        assert_eq!(lines, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn test_terminal_screen_carriage_return() {
+        let mut screen = TerminalScreen::new();
+        let lines = screen.process("Loading\rDone!\n");
+        assert_eq!(lines, vec!["Done!"]);
+    }
+
+    #[test]
+    fn test_terminal_screen_box_drawing() {
+        let mut screen = TerminalScreen::new();
+        let lines = screen.process("│ctrl+g│to│edit│in│Vim│\n");
+        assert_eq!(lines, vec!["ctrl+g to edit in Vim"]);
+    }
+
+    #[test]
+    fn test_terminal_screen_collapse_spaces() {
+        let mut screen = TerminalScreen::new();
+        let lines = screen.process("Hello    world\n");
+        assert_eq!(lines, vec!["Hello world"]);
+    }
 }

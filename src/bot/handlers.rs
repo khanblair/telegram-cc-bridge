@@ -286,9 +286,8 @@ async fn output_listener(
                         .await;
                     typing_active = true;
                 }
-                let cleaned = formatter::clean_output(&line);
-                if !cleaned.is_empty() {
-                    buffer.push_str(&cleaned);
+                if !line.is_empty() {
+                    buffer.push_str(&line);
                     buffer.push('\n');
                 }
             }
