@@ -1,0 +1,26 @@
+[package]
+name = "telegram-cc-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+teloxide = { version = "0.13", features = ["macros"] }
+portable-pty = "0.8"
+strip-ansi-escapes = "0.2"
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "migrate", "chrono"] }
+config = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1.10"
+anyhow = "1.0"
+base64 = "0.22"
+uuid = { version = "1.6", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+bytes = "1.5"
+
+[dev-dependencies]
+tempfile = "3.9"
