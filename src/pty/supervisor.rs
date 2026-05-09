@@ -48,6 +48,7 @@ impl PtySupervisor {
         let mut master_writer = pair.master.take_writer()?;
 
         let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
+        let auto_answer_tx = stdin_tx.clone();
 
         let state_reader = state.clone();
         let patterns: Vec<_> = adapter.input_prompt_patterns().to_vec();
@@ -79,8 +80,10 @@ impl PtySupervisor {
                         if let Ok(handle) = rt {
                             for line in lines {
                                 // Check for input prompts
+                                let mut is_prompt = false;
                                 for pat in &patterns {
                                     if pat.is_match(&line) {
+                                        is_prompt = true;
                                         let s = state_reader.clone();
                                         let otx = output_tx.clone();
                                         let line_clone = line.clone();
@@ -93,14 +96,22 @@ impl PtySupervisor {
                                     }
                                 }
 
+                                // Auto-answer known prompts (e.g., trust dialog)
+                                if let Some(answer) = adapter.auto_answer(&line) {
+                                    let _ = auto_answer_tx.send(answer.to_string());
+                                }
+
                                 // Record output
                                 let rec = recorder.clone();
                                 let otx = output_tx.clone();
+                                let line_clone = line.clone();
                                 handle.block_on(async move {
-                                    if let Err(e) = rec.record_event(session_id, "out", &line).await {
+                                    if let Err(e) = rec.record_event(session_id, "out", &line_clone).await {
                                         error!("Recorder error: {}", e);
                                     }
-                                    let _ = otx.send(line);
+                                    if !is_prompt {
+                                        let _ = otx.send(line_clone);
+                                    }
                                 });
                             }
                         }
