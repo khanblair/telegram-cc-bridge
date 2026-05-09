@@ -11,9 +11,11 @@ pub struct ClaudeCodeAdapter {
 impl ClaudeCodeAdapter {
     pub fn new(bin: String) -> Self {
         let patterns = vec![
+            // Bypass permissions confirmation
+            Regex::new(r"Enter to confirm").unwrap(),
+            Regex::new(r"Esc to cancel").unwrap(),
             // Trust prompt
             Regex::new(r"Yes, I trust this folder").unwrap(),
-            Regex::new(r"Enter to confirm").unwrap(),
             Regex::new(r"trust this folder").unwrap(),
             // Yes/No prompts
             Regex::new(r"\(y/N\)").unwrap(),
@@ -45,24 +47,6 @@ impl ClaudeCodeAdapter {
         ];
         Self { bin, patterns }
     }
-
-    /// Check if this line is a trust prompt that can be auto-answered
-    pub fn is_trust_prompt(&self, line: &str) -> bool {
-        line.contains("Yes, I trust this folder")
-            || line.contains("trust this folder")
-            || line.contains("Enter to confirm")
-    }
-
-    /// Auto-answer for known prompts
-    pub fn auto_answer(&self, line: &str) -> Option<&str> {
-        if self.is_trust_prompt(line) {
-            Some("1")
-        } else if line.contains("(y/N)") || line.contains("Overwrite?") {
-            Some("y")
-        } else {
-            None
-        }
-    }
 }
 
 impl CliAdapter for ClaudeCodeAdapter {
@@ -73,6 +57,8 @@ impl CliAdapter for ClaudeCodeAdapter {
     fn spawn_cmd(&self, workdir: &Path) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.current_dir(workdir);
+        // Skip permissions to avoid interactive prompts
+        cmd.arg("--dangerously-skip-permissions");
         cmd
     }
 
@@ -82,5 +68,18 @@ impl CliAdapter for ClaudeCodeAdapter {
 
     fn strip_output(&self, raw: &str) -> String {
         strip_ansi_escapes::strip_str(raw)
+    }
+
+    /// Auto-answer for known prompts
+    fn auto_answer(&self, line: &str) -> Option<&str> {
+        if line.contains("Enter to confirm") || line.contains("Esc to cancel") {
+            Some("\n") // Press Enter to confirm
+        } else if line.contains("Yes, I trust this folder") || line.contains("trust this folder") {
+            Some("1\n") // Select option 1
+        } else if line.contains("(y/N)") || line.contains("Overwrite?") {
+            Some("y\n") // Yes
+        } else {
+            None
+        }
     }
 }
